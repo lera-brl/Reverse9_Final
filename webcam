@@ -1,0 +1,15 @@
+frame = cv2.flip(frame, 1)  # зеркалим изображение
+
+# Если кадр горизонтальный (вебкам) — обрезаем центр и поворачиваем
+if frame.shape[1] > frame.shape[0]:
+    # Обрезаем центральный квадрат из горизонтального изображения
+    h, w = frame.shape[:2]
+    crop_size = h  # делаем квадрат по высоте
+    x_start = (w - crop_size) // 2
+    frame = frame[:, x_start:x_start + crop_size]  # обрезаем по ширине
+    frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)  # поворачиваем
+
+# После поворота — обновляем размеры и центр
+frame_height, frame_width = frame.shape[:2]
+center_x = frame_width // 2
+center_y = frame_height // 2

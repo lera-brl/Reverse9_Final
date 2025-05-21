@@ -1,0 +1,155 @@
+from deepface import DeepFace
+import cv2
+import mediapipe as mp
+import math
+import time
+
+# Настройка MediaPipe FaceMesh
+mp_face_mesh = mp.solutions.face_mesh
+drawing = mp.solutions.drawing_utils
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
+
+def run_emotion_session():
+    cap = cv2.VideoCapture(0)
+    frame_width = int(cap.get(3))
+    frame_height = int(cap.get(4))
+    center_x = frame_width // 2
+    center_y = frame_height // 2
+    circle_radius = 180
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    message = ""
+    ready = False
+    countdown_started = False
+    timer_start = 0
+    timer_duration = 3
+    photo_taken = False
+
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            break
+
+        frame = cv2.flip(frame, 1)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb_frame)
+
+        clean_frame = frame.copy()
+        cv2.circle(frame, (center_x, center_y), circle_radius, (0, 255, 0), 2)
+        ready = False
+
+        if results.multi_face_landmarks:
+            face_landmarks = results.multi_face_landmarks[0]
+            mesh_points = [(int(p.x * frame_width), int(p.y * frame_height)) for p in face_landmarks.landmark]
+
+            # Маска
+            drawing.draw_landmarks(
+                image=frame,
+                landmark_list=face_landmarks,
+                connections=mp_face_mesh.FACEMESH_TESSELATION,
+                landmark_drawing_spec=None,
+                connection_drawing_spec=drawing.DrawingSpec(color=(0, 255, 0), thickness=1, circle_radius=1)
+            )
+
+            all_inside = all(
+                math.hypot(x - center_x, y - center_y) <= circle_radius for (x, y) in mesh_points
+            )
+
+            if all_inside:
+                message = "Perfect! Hold still..."
+                ready = True
+            else:
+                message = "Center your face"
+                countdown_started = False
+
+            if ready and not countdown_started:
+                countdown_started = True
+                timer_start = time.time()
+
+            if countdown_started and not photo_taken:
+                seconds_passed = time.time() - timer_start
+                seconds_left = int(timer_duration - seconds_passed + 1)
+
+                if seconds_passed < timer_duration:
+                    cv2.putText(frame, str(seconds_left), (center_x - 20, center_y - 100), font, 3, (0, 255, 0), 6)
+                else:
+                    photo = clean_frame.copy()
+                    filename = "captured_face.png"
+                    cv2.imwrite(filename, photo)
+
+                    result = DeepFace.analyze(img_path=filename, actions=['emotion'], enforce_detection=False)
+                    emotions = result[0]['emotion']
+                    dominant = result[0]['dominant_emotion']
+
+                    happy = emotions.get("happy", 0)
+                    sad = emotions.get("sad", 0)
+                    angry = emotions.get("angry", 0)
+                    fear = emotions.get("fear", 0)
+                    disgust = emotions.get("disgust", 0)
+                    surprise = emotions.get("surprise", 0)
+                    neutral = emotions.get("neutral", 0)
+
+                    category = "Unknown"
+                    if dominant == "happy" and happy < 90:
+                        category = "1. Loss of Authentic Identity"
+                    elif dominant == "disgust":
+                        category = "2. Social Comparison"
+                    elif dominant == "fear":
+                        category = "3. Behavioral Conditioning"
+                    elif dominant == "angry":
+                        category = "4. Emotional Reactivity"
+                    elif dominant == "surprise" and fear >= 5:
+                        category = "5. Addictive Engagement Patterns"
+                    elif dominant == "sad":
+                        category = "6. Emotional Exhaustion"
+                    elif dominant == "happy" and disgust >= 5:
+                        category = "7. Self-Modification"
+                    elif dominant == "neutral":
+                        category = "8. Ideological Shaping"
+                    elif dominant == "happy" and happy >= 90:
+                        category = "9. Emotional Filtering"
+
+                    # Надписи на фото
+                    cv2.putText(photo, f"Emotion: {dominant.capitalize()}", (30, 60), font, 1.0, (0, 255, 0), 2)
+                    cv2.putText(photo, f"Category: {category}", (30, 110), font, 1.0, (0, 255, 0), 2)
+
+                    cap.release()
+                    cv2.imshow("Reverse9 Result", photo)
+                    photo_taken = True
+
+                    # Эмоции в терминал
+                    print("\n— Emotion Analysis —")
+                    for emotion, value in emotions.items():
+                        print(f"{emotion.capitalize()}: {int(value)}%")
+                    print(f"\nDominant Emotion: {dominant.capitalize()}")
+                    print(f"Assigned Category: {category}\n")
+
+                    break
+
+        else:
+            message = "Face not detected"
+            countdown_started = False
+
+        if message:
+            cv2.putText(frame, message, (30, 60), font, 1, (0, 255, 0), 3)
+
+        cv2.imshow("Reverse9 Mirror", frame)
+
+        if cv2.waitKey(5) & 0xFF == ord('q'):
+            cap.release()
+            break
+
+    # Freeze screen until Q or N
+    while photo_taken:
+        key = cv2.waitKey(5) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('n'):
+            cv2.destroyAllWindows()
+            run_emotion_session()
+            break
+
+    cv2.destroyAllWindows()
+
+# Запуск
+run_emotion_session()

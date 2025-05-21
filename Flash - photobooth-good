@@ -1,0 +1,188 @@
+# === Обновлённый Reverse9.py ===
+
+from deepface import DeepFace
+import cv2
+import mediapipe as mp
+import math
+import time
+import random
+import numpy as np
+from insightface.app import FaceAnalysis
+from insightface.model_zoo import get_model
+
+# Настройка FaceMesh
+mp_face_mesh = mp.solutions.face_mesh
+drawing = mp.solutions.drawing_utils
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
+
+# Настройка FaceSwap
+face_analyzer = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_analyzer.prepare(ctx_id=0)
+swapper = get_model("InteractiveMirror9/models/inswapper_128.onnx", providers=['CPUExecutionProvider'])
+
+# Камера
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1080)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1920)
+
+# Центры и размеры
+frame_width = 1080
+frame_height = 1920
+center_x = frame_width // 2
+center_y = frame_height // 2
+oval_center = (center_x, center_y)
+axes_length = (190, 270)
+
+# Цвета и шрифт
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+FONT = cv2.FONT_HERSHEY_TRIPLEX
+
+# Размеры текста
+HEADING_SIZE = 1.5
+SUBHEADING_SIZE = 1.0
+SMALL_UI_SIZE = 0.8
+
+# UI тексты
+ui_texts = {
+    "heading": {"text": "Show me how social media makes you feel?", "x": 120, "y": 100, "size": HEADING_SIZE, "color": BLACK},
+    "align": {"text": "Align your face inside the oval", "x": 180, "y": 160, "size": SUBHEADING_SIZE, "color": BLACK},
+    "auto": {"text": "A photo will be taken automatically.", "x": 160, "y": 200, "size": SUBHEADING_SIZE, "color": BLACK},
+    "visible": {"text": "Keep your face fully visible.", "x": 80, "y": 880, "size": SMALL_UI_SIZE, "color": WHITE},
+    "glasses": {"text": "No hair or glasses.", "x": 80, "y": 920, "size": SMALL_UI_SIZE, "color": WHITE},
+    "snapshot": {"text": "Snapshot in", "x": 400, "y": 560, "size": HEADING_SIZE, "color": WHITE},
+    "logo": {"text": "Reverse9", "x": 400, "y": 40, "size": SUBHEADING_SIZE, "color": BLACK}
+}
+
+# === Вспомогательные переменные ===
+current_stage = 1
+face_in_oval_start_time = None
+snapshot_timer = None
+snapshot_started = False
+countdown_value = 9
+photo_taken = False
+captured_image = None
+show_ui = True  # для скрытия UI во время вспышки
+
+# === Функции ===
+def draw_text(frame, key):
+    t = ui_texts[key]
+    cv2.putText(frame, t["text"], (t["x"], t["y"]), FONT, t["size"], t["color"], 2)
+
+def draw_facemesh(frame, results):
+    if results.multi_face_landmarks:
+        drawing.draw_landmarks(
+            image=frame,
+            landmark_list=results.multi_face_landmarks[0],
+            connections=mp_face_mesh.FACEMESH_TESSELATION,
+            landmark_drawing_spec=None,
+            connection_drawing_spec=drawing.DrawingSpec(color=WHITE, thickness=1, circle_radius=1)
+        )
+
+def check_face_inside(results):
+    if not results.multi_face_landmarks:
+        return False
+    points = [(int(p.x * frame_width), int(p.y * frame_height))
+              for p in results.multi_face_landmarks[0].landmark]
+    return all(((x - oval_center[0]) ** 2) / (axes_length[0] ** 2) +
+               ((y - oval_center[1]) ** 2) / (axes_length[1] ** 2) <= 1 for (x, y) in points)
+
+def stage_1(frame, results):
+    global current_stage, face_in_oval_start_time
+    draw_text(frame, "heading")
+    draw_text(frame, "align")
+    draw_text(frame, "auto")
+    draw_text(frame, "logo")
+    cv2.ellipse(frame, oval_center, axes_length, 0, 0, 360, WHITE, 2)
+
+    if check_face_inside(results):
+        if face_in_oval_start_time is None:
+            face_in_oval_start_time = time.time()
+        elif time.time() - face_in_oval_start_time >= 1:
+            current_stage = 2
+    else:
+        face_in_oval_start_time = None
+
+def stage_2(frame, results):
+    global current_stage, snapshot_timer, snapshot_started, countdown_value
+    draw_text(frame, "heading")
+    draw_text(frame, "logo")
+    cv2.ellipse(frame, oval_center, axes_length, 0, 0, 360, WHITE, 2)
+    draw_facemesh(frame, results)
+
+    if check_face_inside(results):
+        if not snapshot_started:
+            snapshot_timer = time.time()
+            snapshot_started = True
+
+        seconds_passed = time.time() - snapshot_timer
+        countdown_value = max(0, 9 - int(seconds_passed))
+
+        draw_text(frame, "visible")
+        draw_text(frame, "glasses")
+        snapshot_label = f"{ui_texts['snapshot']['text']} {countdown_value}"
+        cv2.putText(frame, snapshot_label, (ui_texts['snapshot']["x"], ui_texts['snapshot']["y"]),
+                    FONT, ui_texts['snapshot']["size"], ui_texts['snapshot']["color"], 2)
+
+        if countdown_value == 0:
+            current_stage = 3
+    else:
+        snapshot_started = False
+        snapshot_timer = None
+        countdown_value = 9
+        current_stage = 1
+
+def stage_3(frame, clean_frame, results):
+    global current_stage, photo_taken, captured_image, show_ui
+    show_ui = False
+
+    flash = np.ones_like(frame) * 255
+    cv2.imshow("Reverse9 Mirror", flash)
+    cv2.waitKey(300)
+
+    filename = "captured_face.png"
+    cv2.imwrite(filename, clean_frame)
+
+    captured_image = clean_frame.copy()
+    draw_facemesh(captured_image, results)
+    cv2.imshow("Reverse9 Mirror", captured_image)
+    cv2.waitKey(1000)
+
+    current_stage = 4
+    photo_taken = True
+    show_ui = True
+
+# === Главный цикл ===
+while cap.isOpened():
+    success, frame = cap.read()
+    if not success:
+        break
+
+    frame = cv2.flip(frame, 1)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb)
+    clean_frame = frame.copy()
+
+    if current_stage == 1:
+        stage_1(frame, results)
+    elif current_stage == 2:
+        stage_2(frame, results)
+    elif current_stage == 3:
+        stage_3(frame, clean_frame, results)
+
+    canvas_frame = cv2.resize(frame, (1080, 1920))
+    cv2.imshow("Reverse9 Mirror", canvas_frame)
+
+    key = cv2.waitKey(5) & 0xFF
+    if key == ord('q'):
+        break
+    elif key == ord('n'):
+        current_stage = 1
+        snapshot_timer = None
+        snapshot_started = False
+        face_in_oval_start_time = None
+        countdown_value = 9
+    elif key == ord('t'):
+        current_stage += 1
+
+cv2.destroyAllWindows()

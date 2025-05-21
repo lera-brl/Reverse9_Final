@@ -1,0 +1,229 @@
+from deepface import DeepFace
+import cv2
+import mediapipe as mp
+import math
+import time
+import random
+import numpy as np  # NEW: добавлен импорт для работы с canvas
+from insightface.app import FaceAnalysis
+from insightface.model_zoo import get_model
+
+# Настройка MediaPipe FaceMesh
+mp_face_mesh = mp.solutions.face_mesh
+drawing = mp.solutions.drawing_utils
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
+
+# Инициализация FaceSwap
+face_analyzer = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_analyzer.prepare(ctx_id=0)
+swapper = get_model("InteractiveMirror9/models/inswapper_128.onnx", providers=['CPUExecutionProvider'])
+
+# Frame for canvas 1080x1920
+def fit_to_canvas(img, canvas_width=1080, canvas_height=1920):  # My illustartions fitting 
+    canvas = 255 * np.ones((canvas_height, canvas_width, 3), dtype=np.uint8)  
+    h, w = img.shape[:2]  
+    scale = min(canvas_width / w, canvas_height / h)  
+    new_w, new_h = int(w * scale), int(h * scale)  
+    resized_img = cv2.resize(img, (new_w, new_h))  
+
+    x_offset = (canvas_width - new_w) // 2  
+    y_offset = (canvas_height - new_h) // 2  
+    canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized_img  
+
+    return canvas  
+
+# Categorie Section for predictive model
+category_to_illustration = {
+    1: "pride.jpg",          # Loss of Authentic Identity
+    2: "social.jpg",         # Social Comparison
+    3: "Idris.jpg",          # Behavioral Conditioning
+    4: "angryface.png",      # Emotional Reactivity
+    5: "mouth.jpg",          # Addictive Engagement Patterns
+    6: "prison.jpg",         # Emotional Exhaustion
+    7: "self.png",           # Self-Modification
+    8: "hand.jpg",           # Ideological Shaping
+    9: "mouse.jpg",          # Emotional Filtering
+}
+
+def run_emotion_session():
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1080)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1920)
+
+    frame_width = 1080
+    frame_height = 1920
+    center_x = frame_width // 2
+    center_y = frame_height // 2
+    axes_length = (190, 270)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    message = ""
+    ready = False
+    countdown_started = False
+    timer_start = 0
+    timer_duration = 3
+    photo_taken = False
+
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            break
+
+        frame = cv2.flip(frame, 1) #Camera + Webcam
+        if frame.shape[1] > frame.shape[0]:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            frame_height, frame_width = frame.shape[:2]
+            center_x = frame_width // 2
+            center_y = frame_height // 2
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb_frame)
+
+        clean_frame = frame.copy()
+        cv2.ellipse(frame, (center_x, center_y - 150), axes_length, 0, 0, 360, (0, 255, 0), 2)
+        ready = False
+
+        if results.multi_face_landmarks:
+            face_landmarks = results.multi_face_landmarks[0]
+            mesh_points = [(int(p.x * frame_width), int(p.y * frame_height)) for p in face_landmarks.landmark]
+
+            drawing.draw_landmarks(
+                image=frame,
+                landmark_list=face_landmarks,
+                connections=mp_face_mesh.FACEMESH_TESSELATION,
+                landmark_drawing_spec=None,
+                connection_drawing_spec=drawing.DrawingSpec(color=(0, 255, 0), thickness=1, circle_radius=1)
+            )
+
+            all_inside = all(
+                ((x - center_x) ** 2) / (axes_length[0] ** 2) + ((y - (center_y - 150)) ** 2) / (axes_length[1] ** 2) <= 1
+                for (x, y) in mesh_points
+            )
+
+            if all_inside:
+                message = "Perfect! Hold still..."
+                ready = True
+            else:
+                message = "Center your face"
+                countdown_started = False
+
+            if ready and not countdown_started:
+                countdown_started = True
+                timer_start = time.time()
+
+            if countdown_started and not photo_taken:
+                seconds_passed = time.time() - timer_start
+                seconds_left = int(timer_duration - seconds_passed + 1)
+
+                if seconds_passed < timer_duration:
+                    cv2.putText(frame, str(seconds_left), (center_x - 20, center_y - 100), font, 3, (0, 255, 0), 6)
+                else:
+                    photo = clean_frame.copy()
+                    filename = "captured_face.png"
+                    cv2.imwrite(filename, photo)
+
+                    result = DeepFace.analyze(img_path=filename, actions=['emotion'], enforce_detection=False) #img path
+                    emotions = result[0]['emotion']
+                    dominant = result[0]['dominant_emotion']
+
+                    happy = emotions.get("happy", 0)
+                    sad = emotions.get("sad", 0)
+                    angry = emotions.get("angry", 0)
+                    fear = emotions.get("fear", 0)
+                    disgust = emotions.get("disgust", 0)
+                    surprise = emotions.get("surprise", 0)
+                    neutral = emotions.get("neutral", 0)
+
+                    category_num = 0
+                    category = "Unknown"
+                    if dominant == "happy" and happy < 90:
+                        category = "1. Loss of Authentic Identity"
+                        category_num = 1
+                    elif dominant == "disgust":
+                        category = "2. Social Comparison"
+                        category_num = 2
+                    elif dominant == "fear":
+                        category = "3. Behavioral Conditioning"
+                        category_num = 3
+                    elif dominant == "angry":
+                        category = "4. Emotional Reactivity"
+                        category_num = 4
+                    elif dominant == "surprise" and fear >= 5:
+                        category = "5. Addictive Engagement Patterns"
+                        category_num = 5
+                    elif dominant == "sad":
+                        category = "6. Emotional Exhaustion"
+                        category_num = 6
+                    elif dominant == "happy" and disgust >= 5:
+                        category = "7. Self-Modification"
+                        category_num = 7
+                    elif dominant == "neutral":
+                        category = "8. Ideological Shaping"
+                        category_num = 8
+                    elif dominant == "happy" and happy >= 90:
+                        category = "9. Emotional Filtering"
+                        category_num = 9
+
+                    if category_num == 0:
+                        category_num = random.randint(1, 9)
+                        category = f"{category_num}. Randomly Assigned"
+
+                    illustration_file = category_to_illustration.get(category_num, "default.png")
+                    target_path = f"InteractiveMirror9/illustrations/{illustration_file}"
+                    source_img = cv2.imread(filename)
+                    target_img = cv2.imread(target_path)
+
+                    if source_img is not None and target_img is not None:
+                        source_faces = face_analyzer.get(source_img)
+                        target_faces = face_analyzer.get(target_img)
+
+                        if len(source_faces) > 0 and len(target_faces) > 0:
+                            swapped_img = swapper.get(target_img, target_faces[0], source_faces[0], paste_back=True)
+
+                            cv2.putText(swapped_img, f"Emotion: {dominant.capitalize()}", (30, 60), font, 1.0, (0, 255, 0), 2)
+                            cv2.putText(swapped_img, f"Category: {category}", (30, 110), font, 1.0, (0, 255, 0), 2)
+
+                            canvas_result = fit_to_canvas(swapped_img)  # NEW
+                            cv2.imwrite("output_swapped.png", canvas_result)  # NEW: сохрани результат в канвасе
+                            cv2.imshow("Reverse9 Result", canvas_result)  # NEW: показ результата в канвасе
+                            photo_taken = True
+                        else:
+                            print("Ошибка: лицо не найдено на фото или иллюстрации.")
+                    else:
+                        print("Ошибка: не удалось загрузить изображения для FaceSwap.")
+
+                    print("\n— Emotion Analysis —")
+                    for emotion, value in emotions.items():
+                        print(f"{emotion.capitalize()}: {int(value)}%")
+                    print(f"\nDominant Emotion: {dominant.capitalize()}")
+                    print(f"Assigned Category: {category}\n")
+
+                    cap.release()
+                    break
+
+        else:
+            message = "Face not detected"
+            countdown_started = False
+
+        if message:
+            cv2.putText(frame, message, (30, 60), font, 1, (0, 255, 0), 3)
+
+        #canvas_frame = fit_to_canvas(frame)  # camera-live feed to canvas/this or fit_to_canvas
+        canvas_frame = cv2.resize(frame, (1080, 1920)) # Resize the frame to fit the canvas
+        cv2.imshow("Reverse9 Mirror", canvas_frame)  
+
+        if cv2.waitKey(5) & 0xFF == ord('q'):
+            cap.release()
+            break
+
+    while photo_taken:
+        key = cv2.waitKey(5) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('n'):
+            cv2.destroyAllWindows()
+            run_emotion_session()
+            break
+
+    cv2.destroyAllWindows()
+
+run_emotion_session()

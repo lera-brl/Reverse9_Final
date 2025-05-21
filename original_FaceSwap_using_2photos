@@ -1,0 +1,46 @@
+from insightface.app import FaceAnalysis
+from insightface.model_zoo import get_model
+import cv2
+import os
+
+# Пути к файлам
+source_img_path = "InteractiveMirror9/masha.jpg"        # лицо девочки
+target_img_path = "InteractiveMirror9/self.png"   # иллюстрация
+output_path = "output_swapped.png"                     # куда сохранить результат
+model_path = "InteractiveMirror9/models/inswapper_128.onnx"  # модель
+
+# Инициализация анализа лиц
+face_analyzer = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_analyzer.prepare(ctx_id=0)
+
+# Загрузка модели замены лиц
+swapper = get_model(model_path, providers=['CPUExecutionProvider'])
+
+# Загрузка изображений
+target_img = cv2.imread(target_img_path)
+source_img = cv2.imread(source_img_path)
+
+# Проверка загрузки
+if target_img is None:
+    print("Ошибка: не удалось загрузить face")
+elif source_img is None:
+    print("Ошибка: не удалось загрузить illustration")
+else:
+    # Обнаружение лиц
+    target_faces = face_analyzer.get(target_img)
+    source_faces = face_analyzer.get(source_img)
+
+    if len(target_faces) == 0 or len(source_faces) == 0:
+        print("Лицо не найдено на одном из изображений!")
+    else:
+        # Подмена лица
+        swapped_img = swapper.get(target_img, target_faces[0], source_faces[0], paste_back=True)
+
+        # Сохранение результата
+        cv2.imwrite(output_path, swapped_img)
+        print("Готово! Результат сохранён как", output_path)
+
+        # Отображение результата
+        cv2.imshow("Swapped Face Result", swapped_img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()

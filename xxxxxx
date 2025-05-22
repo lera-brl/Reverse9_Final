@@ -1,0 +1,534 @@
+# === Stage: Technical Setup ===
+from deepface import DeepFace
+import cv2
+import mediapipe as mp
+import math
+import time
+import random
+import numpy as np
+from insightface.app import FaceAnalysis
+from insightface.model_zoo import get_model
+import threading
+
+# Настройка MediaPipe FaceMesh
+mp_face_mesh = mp.solutions.face_mesh
+drawing = mp.solutions.drawing_utils
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
+
+# Настройка FaceSwap
+face_analyzer = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_analyzer.prepare(ctx_id=0)
+swapper = get_model("InteractiveMirror9/models/inswapper_128.onnx", providers=['CPUExecutionProvider'])
+
+# Frame for canvas 1080x1920
+def fit_to_canvas(img, canvas_width=1080, canvas_height=1920):  # My illustartions fitting 
+    canvas = 255 * np.ones((canvas_height, canvas_width, 3), dtype=np.uint8)  
+    h, w = img.shape[:2]  
+    scale = min(canvas_width / w, canvas_height / h)  
+    new_w, new_h = int(w * scale), int(h * scale)  
+    resized_img = cv2.resize(img, (new_w, new_h))  
+
+    x_offset = (canvas_width - new_w) // 2  
+    y_offset = (canvas_height - new_h) // 2  
+    canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized_img  
+
+    return canvas  
+
+# Categorie Section for predictive model
+category_to_illustration = {
+    1: "pride.jpg",          # Loss of Authentic Identity
+    2: "social.jpg",         # Social Comparison
+    3: "Idris.jpg",          # Behavioral Conditioning
+    4: "angryface.png",      # Emotional Reactivity
+    5: "mouth.jpg",          # Addictive Engagement Patterns
+    6: "prison.jpg",         # Emotional Exhaustion
+    7: "self.png",           # Self-Modification
+    8: "hand.jpg",           # Ideological Shaping
+    9: "mouse.jpg",          # Emotional Filtering
+}
+
+# Настройка камеры
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1080)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1920)
+
+# Размеры канваса и центра
+frame_width = 1080
+frame_height = 1920
+center_x = frame_width // 2
+center_y = frame_height // 2
+oval_center = (center_x, center_y)
+axes_length = (210, 290)
+
+# === Stage: UIDesign ===
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+FONT = cv2.FONT_HERSHEY_DUPLEX
+
+HEADING_SIZE = 1.3
+SUBHEADING_SIZE = 1.1
+SMALL_UI_SIZE = 1
+
+ui_texts = {
+    # === Stage 1: UI TEXT Start (Neutral) ===
+    "heading": {
+        "text": "Show Me How Social Media Makes You Feel?",
+        "x": 60, "y": 290, "size": HEADING_SIZE, "color": BLACK
+    },
+    "align": {
+        "text": "Align your face inside the oval",
+        "x": 60, "y": 365, "size": SUBHEADING_SIZE, "color": BLACK
+    },
+    "auto": {
+        "text": "A photo will be taken automatically.",
+        "x": 60, "y": 405, "size": SUBHEADING_SIZE, "color": BLACK
+    },
+
+    # === Stage 2: White UI (fixed near oval) ===
+    "visible": {
+        "text": "Keep your face fully visible.",
+        "x": 60, "y": 630, "size": SMALL_UI_SIZE, "color": WHITE #x56
+    },
+    "glasses": {
+        "text": "No hair or glasses.",
+        "x": 60, "y": 670, "size": SMALL_UI_SIZE, "color": WHITE #x56
+    },
+
+    # === Stage 2: Snapshot countdown ===
+    "snapshot": {
+        "text": "Snapshot in",
+        "x": 409, "y": 536, "size": HEADING_SIZE, "color": WHITE
+    },
+
+    # === Logo (показывается всегда сверху, кроме после фото) ===
+    "logo": {
+        "text": "REVERSE9",
+        "x": 438, "y": 50, "size": SUBHEADING_SIZE, "color": BLACK
+    }
+}
+
+# === Stage: Global State Variables ===
+current_stage = 1
+face_in_oval_start_time = None
+snapshot_timer = None
+snapshot_started = False
+countdown_value = 9
+photo_taken = False
+captured_image = None
+show_ui = True
+show_white_labels = False  # Появляется только при первом входе 
+white_labels_triggered = False
+backend_started_time = None
+final_generated_image = None  # Переменная для хранения финального изображения
+backend_started = False
+backend_completed = False
+abackend_started = False
+backend_completed = False
+backend_thread = None  # для фонового потока
+
+
+
+# ===  Fonts  ===
+def draw_text(frame, key):
+    t = ui_texts[key]
+
+    # Font thickness
+    if t["size"] == HEADING_SIZE:
+        thickness = 3  # жирный
+    elif t["size"] == SUBHEADING_SIZE:
+        thickness = 2  # средний
+    elif t["size"] == SMALL_UI_SIZE:
+        thickness = 1  # тонкий
+    else:
+        return
+        #raise ValueError(f"Неизвестный размер шрифта: {t['size']} для ключа '{key}'")
+
+    cv2.putText(
+        frame,
+        t["text"],
+        (t["x"], t["y"]),
+        FONT,
+        t["size"],
+        t["color"],
+        thickness
+    )
+
+def draw_facemesh(frame, results):
+    if results.multi_face_landmarks:
+        drawing.draw_landmarks(
+            image=frame,
+            landmark_list=results.multi_face_landmarks[0],
+            connections=mp_face_mesh.FACEMESH_TESSELATION,
+            landmark_drawing_spec=None,
+            connection_drawing_spec=drawing.DrawingSpec(color=WHITE, thickness=1, circle_radius=1)
+        )
+
+def check_face_inside(results):
+    if not results.multi_face_landmarks:
+        return False
+    points = [(int(p.x * frame_width), int(p.y * frame_height))
+              for p in results.multi_face_landmarks[0].landmark]
+    return all(((x - oval_center[0]) ** 2) / (axes_length[0] ** 2) +
+               ((y - oval_center[1]) ** 2) / (axes_length[1] ** 2) <= 1 for (x, y) in points)
+
+# === Stage 1: Start (Neutral) ===
+def stage_1(frame, results):
+    global current_stage, face_in_oval_start_time, white_labels_triggered, show_white_labels
+    draw_text(frame, "heading")
+    draw_text(frame, "align")
+    draw_text(frame, "auto")
+    draw_text(frame, "logo")
+    cv2.ellipse(frame, oval_center, axes_length, 0, 0, 360, WHITE, 2)
+
+    if white_labels_triggered:
+        show_white_labels = True
+
+    if show_white_labels:
+        draw_text(frame, "visible")
+        draw_text(frame, "glasses")
+
+    if check_face_inside(results):
+        if face_in_oval_start_time is None:
+            face_in_oval_start_time = time.time()
+        elif time.time() - face_in_oval_start_time >= 1:
+            current_stage = 2
+    else:
+        face_in_oval_start_time = None
+
+
+
+# === Stage 2: In Frame + Countdown ===
+def stage_2(frame, results):
+    global current_stage, snapshot_timer, snapshot_started, countdown_value
+    global show_white_labels, white_labels_triggered  # обязательно глобальные переменные
+
+    draw_text(frame, "heading")
+    draw_text(frame, "logo")
+    cv2.ellipse(frame, oval_center, axes_length, 0, 0, 360, WHITE, 3)
+    draw_facemesh(frame, results)
+
+    # Показываем белые надписи — даже если лицо вышло из овала
+    if show_white_labels:
+        draw_text(frame, "visible")
+        draw_text(frame, "glasses")
+
+    if check_face_inside(results):
+        # Первый вход в овал — запускаем таймер
+        if not snapshot_started:
+            snapshot_timer = time.time()
+            snapshot_started = True
+            white_labels_triggered = True
+
+        # Один раз активировали — продолжаем показывать
+        if white_labels_triggered:
+            show_white_labels = True
+
+        # Отсчёт
+        seconds_passed = time.time() - snapshot_timer
+        countdown_value = max(0, 5 - int(seconds_passed)) #snapshot timing
+
+        text = f"{ui_texts['snapshot']['text']} {countdown_value}"
+        cv2.putText(frame, text, (ui_texts['snapshot']["x"], ui_texts['snapshot']["y"]),
+                    FONT, ui_texts['snapshot']["size"], ui_texts['snapshot']["color"], 2)
+
+        if countdown_value == 0:
+            current_stage = 3
+
+    else:
+        # Зритель вышел — сброс таймера, но НЕ трогаем show_white_labels
+        snapshot_started = False
+        snapshot_timer = None
+        countdown_value = 9
+        current_stage = 1
+        
+
+# === Stage 3: Photo Captured + Blink Effect ===
+def stage_3_capture_and_blink(frame, clean_frame, results):
+    global current_stage, photo_taken, show_ui
+
+    show_ui = False  # Временно скрываем UI
+
+    # — Сохраняем чистое изображение —
+    filename = "captured_face.png"
+    cv2.imwrite(filename, clean_frame)
+
+    # — Мгновенный чёрный кадр —
+    black_overlay = np.zeros_like(frame)
+    cv2.imshow("Reverse9 Mirror", black_overlay)
+    cv2.waitKey(123) #5
+
+    # — Переход на Stage 4 (анализ будет там) —
+    draw_facemesh(frame, results)
+    current_stage = 4
+    photo_taken = True
+    show_ui = True
+
+
+# === Stage: Backend (Emotion Analysis + FaceSwap) ===
+def run_backend_pipeline(clean_frame):
+    print(">>> Running backend pipeline...")
+    global final_generated_image
+
+    # Сохраняем изображение
+    filename = "captured_face.png"
+    #cv2.imwrite(filename, clean_frame)
+
+    # Эмоции
+    result = DeepFace.analyze(img_path=filename, actions=['emotion'], enforce_detection=False)
+    emotions = result[0]['emotion']
+    dominant = result[0]['dominant_emotion']
+
+    # >>> Чистый терминал как в оригинале
+    print("\n— Emotion Analysis —")
+    for emotion, value in emotions.items():
+        print(f"{emotion.capitalize()}: {int(value)}%")
+
+    print(f"\nDominant Emotion: {dominant.capitalize()}")
+
+    # Интерпретация эмоции в категорию
+    happy = emotions.get("happy", 0)
+    sad = emotions.get("sad", 0)
+    angry = emotions.get("angry", 0)
+    fear = emotions.get("fear", 0)
+    disgust = emotions.get("disgust", 0)
+    surprise = emotions.get("surprise", 0)
+    neutral = emotions.get("neutral", 0)
+
+    category_num = 0
+    category = "Unknown"
+    if dominant == "happy" and happy < 90:
+        category = "1. Loss of Authentic Identity"
+        category_num = 1
+    elif dominant == "disgust":
+        category = "2. Social Comparison"
+        category_num = 2
+    elif dominant == "fear":
+        category = "3. Behavioral Conditioning"
+        category_num = 3
+    elif dominant == "angry":
+        category = "4. Emotional Reactivity"
+        category_num = 4
+    elif dominant == "surprise" and fear >= 5:
+        category = "5. Addictive Engagement Patterns"
+        category_num = 5
+    elif dominant == "sad":
+        category = "6. Emotional Exhaustion"
+        category_num = 6
+    elif dominant == "happy" and disgust >= 5:
+        category = "7. Self-Modification"
+        category_num = 7
+    elif dominant == "neutral":
+        category = "8. Ideological Shaping"
+        category_num = 8
+    elif dominant == "happy" and happy >= 90:
+        category = "9. Emotional Filtering"
+        category_num = 9
+
+    if category_num == 0:
+        category_num = random.randint(1, 9)
+        category = f"{category_num}. Randomly Assigned"
+
+    print(f"Assigned Category: {category}")
+
+    # Путь к иллюстрации
+    illustration_file = category_to_illustration.get(category_num, "default.png")
+    target_path = f"InteractiveMirror9/illustrations/{illustration_file}"
+
+    # FaceSwap
+    source_img = cv2.imread(filename)
+    target_img = cv2.imread(target_path)
+
+    if source_img is not None and target_img is not None:
+        source_faces = face_analyzer.get(source_img)
+        target_faces = face_analyzer.get(target_img)
+
+        if len(source_faces) > 0 and len(target_faces) > 0:
+            swapped_img = swapper.get(target_img, target_faces[0], source_faces[0], paste_back=True)
+            final_generated_image = swapped_img
+            canvas_result = fit_to_canvas(swapped_img)
+            cv2.imwrite("output_swapped.png", canvas_result)
+            return swapped_img, category, dominant
+        else:
+            print("Error: Face Not Detected.")
+            return None, category, dominant
+    else:
+        print("Error: Failed to load Image.")
+        return None, category, dominant
+
+def async_backend_task(clean_frame):
+    global final_generated_image, backend_completed
+
+    final_generated_image, _, _ = run_backend_pipeline(clean_frame)
+    backend_completed = True
+    print(">>> Backend finished.")
+
+
+# === Stage 4: Loading Screen ===
+def stage_4_loading(frame, clean_frame, results):
+    global current_stage, backend_started_time, final_generated_image
+    global backend_started, backend_completed, backend_thread
+
+    draw_facemesh(frame, results)  # Маска остаётся
+
+    # Запуск backend — только один раз, в фоне
+    if not backend_started:
+        backend_started_time = time.time()
+        backend_started = True
+        backend_thread = threading.Thread(target=async_backend_task, args=(clean_frame,))
+        backend_thread.start()
+        print(">>> Backend thread started...")
+
+    # === UI LOADING ЭКРАН ===
+    cv2.putText(frame, "You are being categorised and transformed.",
+                (60, 290), FONT, HEADING_SIZE, BLACK, 3)
+
+    dot_count = int((time.time() - backend_started_time) * 1.5) % 4
+    loading_dots = "." * dot_count
+    cv2.putText(frame, f"New identity is loading{loading_dots}",
+                (60, 345), FONT, HEADING_SIZE, BLACK, 3)
+
+    cv2.putText(frame, "It will only take a moment. You will not even notice.",
+                (60, 405), FONT, SUBHEADING_SIZE, BLACK, 2)
+    cv2.putText(frame, "Algorithms appreciate your engagement.",
+                (60, 445), FONT, SUBHEADING_SIZE, BLACK, 2)
+
+    # Переход только если backend завершён и прошло минимум 10 секунд
+    if backend_completed and (time.time() - backend_started_time) >= 10:
+        current_stage = 5
+
+
+# === Stage 5: Rebirth / Transformation ===
+def stage_5_rebirth(frame):
+    global current_stage, final_generated_image
+
+   # if not hasattr(stage_5_rebirth, "printed_debug"):
+        #stage_5_rebirth.printed_debug = True  # Ставим сразу, чтобы не дублировалось
+
+    # Плавное затемнение
+    fade_overlay = frame.copy()
+    cv2.rectangle(fade_overlay, (0, 0), (1080, 1920), (0, 0, 0), -1)
+    alpha = 0.5
+    blended = cv2.addWeighted(fade_overlay, alpha, frame, 1 - alpha, 0)
+
+    # Показываем финальное изображение
+    if final_generated_image is not None:
+       # if not hasattr(stage_5_rebirth, "printed_debug_done"):
+            #print("Stage 5: Rebirth / Transformation")
+           # print(">>> Type of final_generated_image:", type(final_generated_image))
+            #stage_5_rebirth.printed_debug_done = True
+
+        canvas_result = fit_to_canvas(final_generated_image)
+        cv2.imshow("Reverse9 Mirror", canvas_result)
+    else:
+        cv2.imshow("Reverse9 Mirror", blended)
+
+    # Переход к следующей стадии
+    if not hasattr(stage_5_rebirth, "start_time"):
+        stage_5_rebirth.start_time = time.time()
+    elif time.time() - stage_5_rebirth.start_time >= 10:  #illustration show time
+        current_stage = 6
+        #del stage_5_rebirth.start_time
+        #del stage_5_rebirth.printed_debug_done     
+        
+
+   
+ 
+# === Stage 6: Goodbye ===
+def stage_6_goodbye(frame):
+    global current_stage
+
+    # Чёрный фон
+    black_canvas = np.zeros((1920, 1080, 3), dtype=np.uint8)
+
+    # Белый текст "REVERSE9" по центру
+    goodbye_text = "REVERSE9"
+    text_size = cv2.getTextSize(goodbye_text, FONT, HEADING_SIZE, 2)[0]
+    text_x = (1080 - text_size[0]) // 2
+    text_y = (1920 + text_size[1]) // 2
+    cv2.putText(black_canvas, goodbye_text, (text_x, text_y), FONT, HEADING_SIZE, WHITE, 2)
+
+    cv2.imshow("Reverse9 Mirror", black_canvas)
+
+    # Ждём 5 секунд и запускаем всё сначала
+    if not hasattr(stage_6_goodbye, "start_time"):
+        stage_6_goodbye.start_time = time.time()
+    elif time.time() - stage_6_goodbye.start_time >= 1:  #goodbye time #3
+        reset_all_states()  # Сброс всех переменных
+        current_stage = 1
+        del stage_6_goodbye.start_time      
+
+
+# === Stage: Full Restart (Reset All State Variables) ===
+def reset_all_states():
+    global face_in_oval_start_time, snapshot_timer, snapshot_started, countdown_value
+    global photo_taken, show_white_labels, white_labels_triggered
+    global backend_started_time, final_generated_image
+    global backend_started, backend_completed, backend_thread
+
+    # Сброс front-end состояний
+    face_in_oval_start_time = None
+    snapshot_timer = None
+    snapshot_started = False
+    countdown_value = 9
+    photo_taken = False
+    show_white_labels = False
+    white_labels_triggered = False
+
+    # Сброс back-end состояний
+    backend_started_time = None
+    final_generated_image = None
+    backend_started = False
+    backend_completed = False
+    backend_thread = None
+
+    # Сброс Stage 5 таймера (Rebirth)
+    if hasattr(stage_5_rebirth, "start_time"):
+        del stage_5_rebirth.start_time
+
+#===============================================================
+# === Stage: Main Loop === KEEP IN THE END  
+while cap.isOpened():
+    success, frame = cap.read()
+    if not success:
+        break
+
+    frame = cv2.flip(frame, 1)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb)
+    clean_frame = frame.copy()
+
+    
+    # === Переходы между стадиями ===
+    if current_stage == 1:
+        stage_1(frame, results)
+    elif current_stage == 2:
+        stage_2(frame, results)
+    elif current_stage == 3:
+        stage_3_capture_and_blink(frame, clean_frame, results)
+    elif current_stage == 4:
+        stage_4_loading(frame, clean_frame, results)
+    elif current_stage == 5:
+        stage_5_rebirth(frame)
+    elif current_stage == 6:
+        stage_6_goodbye(frame)    
+
+    # === Показываем live-видео только если это НЕ стадия 5 или 6 ===
+    if current_stage not in [5, 6]:
+        canvas_frame = cv2.resize(frame, (1080, 1920))
+        cv2.imshow("Reverse9 Mirror", canvas_frame)
+    # else: ничего не делаем — stage_5 сам рисует
+
+        # === Клавиши управления ===
+    key = cv2.waitKey(5) & 0xFF
+
+    if key == ord('q'):
+        break
+
+    elif key == ord('n'):
+        # Полный сброс всего (frontend + backend + потоки)
+        reset_all_states()
+        current_stage = 1
+
+    # elif key == ord('t'):
+    #     current_stage += 1  # Временно отключено для отладки
+cv2.destroyAllWindows()
